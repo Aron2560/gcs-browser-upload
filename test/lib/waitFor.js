@@ -1,15 +1,12 @@
-import { Promise } from 'es6-promise'
-
-export default function waitFor (fn, timeout = 30) {
+export default function waitFor(fn, timeout = 30) {
   return new Promise((resolve) => {
-    const checkFn = () => {
+    const check = () => {
       if (fn()) {
-        resolve()
+        resolve();
       } else {
-        setTimeout(checkFn, timeout)
+        setTimeout(check, timeout);
       }
-    }
-
-    checkFn()
-  })
+    };
+    check();
+  });
 }
