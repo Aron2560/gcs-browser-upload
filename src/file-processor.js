@@ -1,81 +1,44 @@
-import { Promise } from 'es6-promise'
-import SparkMD5 from 'spark-md5'
-import debug from './debug'
+/**
+ * File chunk reader with SHA-256 checksums via Web Crypto API.
+ *
+ * Forked from QubitProducts/gcs-browser-upload and modernized:
+ * - Replaced spark-md5 (MD5) with crypto.subtle.digest (SHA-256)
+ * - Replaced es6-promise with native Promise
+ * - Zero external dependencies
+ *
+ * SHA-256 replaces MD5 -- fine since checksums are only self-compared
+ * for resume validation, not for cryptographic verification.
+ */
 
-class FileProcessor {
-  constructor (file, chunkSize) {
-    this.paused = false
-    this.file = file
-    this.chunkSize = chunkSize
-    this.unpauseHandlers = []
+export default class FileProcessor {
+  /**
+   * Read a chunk of the file as an ArrayBuffer.
+   *
+   * @param {File} file - The file to read from
+   * @param {number} start - Start byte offset
+   * @param {number} chunkSize - Number of bytes to read
+   * @returns {Promise<ArrayBuffer>} The chunk data
+   */
+  readChunk(file, start, chunkSize) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      const blob = file.slice(start, start + chunkSize);
+
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(blob);
+    });
   }
 
-  async run (fn, startIndex = 0, endIndex) {
-    const { file, chunkSize } = this
-    const totalChunks = Math.ceil(file.size / chunkSize)
-    let spark = new SparkMD5.ArrayBuffer()
-
-    debug('Starting run on file:')
-    debug(` - Total chunks: ${totalChunks}`)
-    debug(` - Start index: ${startIndex}`)
-    debug(` - End index: ${endIndex || totalChunks}`)
-
-    const processIndex = async (index) => {
-      if (index === totalChunks || index === endIndex) {
-        debug('File process complete')
-        return true
-      }
-      if (this.paused) {
-        await waitForUnpause()
-      }
-
-      const start = index * chunkSize
-      const section = file.slice(start, start + chunkSize)
-      const chunk = await getData(file, section)
-      const checksum = getChecksum(spark, chunk)
-
-      const shouldContinue = await fn(checksum, index, chunk)
-      if (shouldContinue !== false) {
-        return processIndex(index + 1)
-      }
-      return false
-    }
-
-    const waitForUnpause = () => {
-      return new Promise((resolve) => {
-        this.unpauseHandlers.push(resolve)
-      })
-    }
-
-    await processIndex(startIndex)
-  }
-
-  pause () {
-    this.paused = true
-  }
-
-  unpause () {
-    this.paused = false
-    this.unpauseHandlers.forEach((fn) => fn())
-    this.unpauseHandlers = []
+  /**
+   * Compute a SHA-256 checksum of an ArrayBuffer, returned as a hex string.
+   *
+   * @param {ArrayBuffer} buffer - The data to hash
+   * @returns {Promise<string>} Hex-encoded SHA-256 hash
+   */
+  async checksum(buffer) {
+    const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 }
-
-function getChecksum (spark, chunk) {
-  spark.append(chunk)
-  const state = spark.getState()
-  const checksum = spark.end()
-  spark.setState(state)
-  return checksum
-}
-
-async function getData (file, blob) {
-  return new Promise((resolve, reject) => {
-    let reader = new window.FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = reject
-    reader.readAsArrayBuffer(blob)
-  })
-}
-
-export default FileProcessor

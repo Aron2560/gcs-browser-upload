@@ -1,61 +1,73 @@
-const STORAGE_KEY = '__gcsBrowserUpload'
+/**
+ * localStorage-backed upload state for resume capability.
+ *
+ * Forked from QubitProducts/gcs-browser-upload and modernized:
+ * - Removed es6-promise polyfill (native Promise)
+ * - Zero external dependencies
+ *
+ * Stores per-file metadata keyed by upload ID. Each entry contains
+ * a map of chunk indexes to SHA-256 checksums, used to determine
+ * which chunks need re-uploading on resume.
+ */
+
+const STORAGE_KEY_PREFIX = "gcs-resumable-upload-";
 
 export default class FileMeta {
-  constructor (id, fileSize, chunkSize, storage) {
-    this.id = id
-    this.fileSize = fileSize
-    this.chunkSize = chunkSize
-    this.storage = storage
+  constructor(id, fileSize, chunkSize) {
+    this.id = id;
+    this.fileSize = fileSize;
+    this.chunkSize = chunkSize;
+    this.storageKey = STORAGE_KEY_PREFIX + id;
   }
 
-  getMeta () {
-    const meta = this.storage.getItem(`${STORAGE_KEY}.${this.id}`)
-    if (meta) {
-      return JSON.parse(meta)
-    } else {
-      return {
-        checksums: [],
-        chunkSize: this.chunkSize,
-        started: false,
-        fileSize: this.fileSize
+  getMeta() {
+    const stored = window.localStorage.getItem(this.storageKey);
+    if (stored) {
+      try {
+        return JSON.parse(stored);
+      } catch (_e) {
+        // Corrupted data, start fresh
       }
     }
+    return {
+      checksums: {},
+      chunkSize: this.chunkSize,
+      fileSize: this.fileSize,
+    };
   }
 
-  setMeta (meta) {
-    const key = `${STORAGE_KEY}.${this.id}`
-    if (meta) {
-      this.storage.setItem(key, JSON.stringify(meta))
-    } else {
-      this.storage.removeItem(key)
+  setMeta(meta) {
+    try {
+      window.localStorage.setItem(this.storageKey, JSON.stringify(meta));
+    } catch (_e) {
+      // localStorage full or unavailable -- upload still works, just can't resume
     }
   }
 
-  isResumable () {
-    let meta = this.getMeta()
-    return meta.started && this.chunkSize === meta.chunkSize
+  addChecksum(index, checksum) {
+    const meta = this.getMeta();
+    meta.checksums[index] = checksum;
+    this.setMeta(meta);
   }
 
-  getResumeIndex () {
-    return this.getMeta().checksums.length
+  getChecksum(index) {
+    return this.getMeta().checksums[index] || null;
   }
 
-  getFileSize () {
-    return this.getMeta().fileSize
+  getResumeIndex() {
+    return Object.keys(this.getMeta().checksums).length;
   }
 
-  addChecksum (index, checksum) {
-    let meta = this.getMeta()
-    meta.checksums[index] = checksum
-    meta.started = true
-    this.setMeta(meta)
+  isResumable() {
+    const meta = this.getMeta();
+    return (
+      meta.fileSize === this.fileSize &&
+      meta.chunkSize === this.chunkSize &&
+      Object.keys(meta.checksums).length > 0
+    );
   }
 
-  getChecksum (index) {
-    return this.getMeta().checksums[index]
-  }
-
-  reset () {
-    this.setMeta(null)
+  deleteMeta() {
+    window.localStorage.removeItem(this.storageKey);
   }
 }
