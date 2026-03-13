@@ -6,7 +6,10 @@
   "main": "src/upload.js",
   "types": "types.d.ts",
   "exports": {
-    ".": "./src/upload.js"
+    ".": {
+      "types": "./types.d.ts",
+      "default": "./src/upload.js"
+    }
   },
   "scripts": {
     "test": "vitest run",
