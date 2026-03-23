@@ -13,6 +13,7 @@ declare module "gcs-browser-upload" {
     chunkSize?: number;
     contentType?: string;
     onChunkUpload?: (data: ChunkUploadData) => void;
+    onProgress?: (info: { uploadedBytes: number; totalBytes: number }) => void;
   };
 
   type UploadResult = {

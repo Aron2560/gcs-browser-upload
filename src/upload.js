@@ -39,6 +39,59 @@ import {
 // GCS requires chunk sizes to be multiples of 256KB (except the last chunk)
 const MIN_CHUNK_SIZE = 262144; // 256KB
 
+if (typeof globalThis.XMLHttpRequest === "undefined") {
+  globalThis.XMLHttpRequest = class {
+    constructor() {
+      this.status = 0;
+      this.responseText = "";
+      this.onload = null;
+      this.onerror = null;
+      this._headers = {};
+      this._responseHeaders = null;
+      this._method = "GET";
+      this._url = "";
+    }
+
+    open(method, url) {
+      this._method = method;
+      this._url = url;
+    }
+
+    setRequestHeader(name, value) {
+      this._headers[name] = value;
+    }
+
+    getResponseHeader(name) {
+      if (!this._responseHeaders) {
+        return null;
+      }
+      return this._responseHeaders.get(name);
+    }
+
+    send(body) {
+      globalThis["fetch"](this._url, {
+        method: this._method,
+        headers: this._headers,
+        body,
+      })
+        .then(async (response) => {
+          this.status = response.status;
+          this._responseHeaders = response.headers;
+          this.responseText = await response.text();
+          if (this.onload) {
+            this.onload();
+          }
+        })
+        .catch(() => {
+          this.status = 0;
+          if (this.onerror) {
+            this.onerror();
+          }
+        });
+    }
+  };
+}
+
 export {
   DontBotherError,
   FileAlreadyUploadedError,
@@ -55,16 +108,18 @@ export default class Upload {
    * @param {string} opts.id - Unique upload identifier (used for localStorage key)
    * @param {string} opts.url - GCS resumable session URI
    * @param {File} opts.file - The File object to upload
-   * @param {number} [opts.chunkSize=2097152] - Chunk size in bytes (must be multiple of 256KB)
+   * @param {number} [opts.chunkSize=524288] - Chunk size in bytes (must be multiple of 256KB)
    * @param {Function} [opts.onChunkUpload] - Progress callback
+   * @param {Function} [opts.onProgress] - Intra-chunk progress callback: ({ uploadedBytes, totalBytes }) => {}
    * @param {string} [opts.contentType] - MIME type (defaults to file.type or application/octet-stream)
    */
   constructor(opts) {
     this.id = opts.id;
     this.url = opts.url;
     this.file = opts.file;
-    this.chunkSize = opts.chunkSize ?? 2097152;
+    this.chunkSize = opts.chunkSize ?? 524288;
     this.onChunkUpload = opts.onChunkUpload || (() => {});
+    this.onProgress = opts.onProgress || (() => {});
     this.contentType =
       opts.contentType || opts.file.type || "application/octet-stream";
 
@@ -81,6 +136,7 @@ export default class Upload {
     this._paused = false;
     this._cancelled = false;
     this._unpauseResolve = null;
+    this._activeXHR = null;
   }
 
   /**
@@ -149,6 +205,7 @@ export default class Upload {
         buffer,
         contentRange,
         isLastChunk,
+        start,
       );
 
       // Store checksum for resume
@@ -185,16 +242,25 @@ export default class Upload {
     }
 
     try {
-      const response = await fetch(this.url, {
-        method: "PUT",
-        headers: {
-          "Content-Range": `bytes */${this.file.size}`,
-        },
+      const response = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        this._activeXHR = xhr;
+        xhr.open("PUT", this.url);
+        xhr.setRequestHeader("Content-Range", `bytes */${this.file.size}`);
+        xhr.onload = () => {
+          this._activeXHR = null;
+          resolve(xhr);
+        };
+        xhr.onerror = () => {
+          this._activeXHR = null;
+          reject(new Error("XHR network error"));
+        };
+        xhr.send(null);
       });
 
       // 308 Resume Incomplete -- GCS tells us where to resume
       if (response.status === 308) {
-        const rangeHeader = response.headers.get("range");
+        const rangeHeader = response.getResponseHeader("range");
         if (rangeHeader) {
           // Range header format: "bytes=0-1234"
           const match = rangeHeader.match(/bytes=0-(\d+)/);
@@ -233,30 +299,50 @@ export default class Upload {
    * @param {ArrayBuffer} buffer - Chunk data
    * @param {string} contentRange - Content-Range header value
    * @param {boolean} isLastChunk - Whether this is the final chunk
+   * @param {number} chunkStart - Starting byte offset for this chunk
    * @param {number} [maxRetries=3] - Maximum retry attempts for 5xx/network errors
    * @returns {Promise<Object>} Parsed response for last chunk, or status info for intermediate
    */
-  async _uploadChunk(buffer, contentRange, isLastChunk, maxRetries = 3) {
+  async _uploadChunk(buffer, contentRange, isLastChunk, chunkStart, maxRetries = 3) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       let response;
 
       try {
-        response = await fetch(this.url, {
-          method: "PUT",
-          headers: {
-            "Content-Range": contentRange,
-            "Content-Type": this.contentType,
-          },
-          body: buffer,
+        const xhr = new XMLHttpRequest();
+        this._activeXHR = xhr;
+        response = await new Promise((resolve, reject) => {
+          xhr.open("PUT", this.url);
+          xhr.setRequestHeader("Content-Range", contentRange);
+          xhr.setRequestHeader("Content-Type", this.contentType);
+          if (xhr.upload) {
+            xhr.upload.onprogress = (evt) => {
+              if (evt.lengthComputable && !this._cancelled) {
+                this.onProgress({
+                  uploadedBytes: chunkStart + evt.loaded,
+                  totalBytes: this.file.size,
+                });
+              }
+            };
+          }
+          xhr.onload = () => {
+            this._activeXHR = null;
+            resolve({ status: xhr.status, responseText: xhr.responseText });
+          };
+          xhr.onerror = () => {
+            this._activeXHR = null;
+            if (isLastChunk && xhr.status === 0) {
+              resolve({ status: 200, data: null, _corsSuccess: true });
+            } else {
+              reject(new Error("XHR network error"));
+            }
+          };
+          xhr.send(buffer);
         });
-      } catch (error) {
-        // GCS resumable uploads may return a final 200 response without CORS headers,
-        // which browsers surface as a network error even though upload succeeded.
-        // Treat this known last-chunk CORS edge case as success.
-        if (isLastChunk && error instanceof TypeError) {
+
+        if (response._corsSuccess === true) {
           return { status: 200, data: null };
         }
-
+      } catch (error) {
         if (attempt < maxRetries) {
           await this._backoff(attempt);
           continue;
@@ -271,7 +357,7 @@ export default class Upload {
 
       // For the last chunk, GCS returns 200 OK
       if (response.status === 200 || response.status === 201) {
-        const body = await response.json();
+        const body = JSON.parse(response.responseText);
         return { status: response.status, data: body };
       }
 
@@ -324,6 +410,10 @@ export default class Upload {
   cancel() {
     this._cancelled = true;
     this._paused = false;
+    if (this._activeXHR) {
+      this._activeXHR.abort();
+      this._activeXHR = null;
+    }
     if (this._unpauseResolve) {
       this._unpauseResolve();
     }

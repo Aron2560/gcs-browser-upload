@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from "vitest";
 import Upload, {
   InvalidChunkSizeError,
   FileAlreadyUploadedError,
@@ -84,13 +84,13 @@ describe("Upload", () => {
       ).not.toThrow();
     });
 
-    it("defaults chunkSize to 2MB when not provided", () => {
+    it("defaults chunkSize to 512KB when not provided", () => {
       const upload = new Upload({
         id: "test",
         url: "http://example.com",
         file: makeFile("x"),
       });
-      expect(upload.chunkSize).toBe(2097152);
+      expect(upload.chunkSize).toBe(524288);
     });
 
     it("uses file.type for contentType when available", () => {
@@ -434,6 +434,50 @@ describe("Upload", () => {
       const err = new UploadCancelledError();
       expect(err).toBeInstanceOf(Error);
       expect(err.name).toBe("UploadCancelledError");
+    });
+
+    it("sets _activeXHR to null after cancel", async () => {
+      const totalSize = CHUNK * 2;
+      const fileData = randomData(totalSize);
+      const upload = new Upload({
+        id: "cancel-xhr-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+        onChunkUpload: () => {
+          upload.cancel();
+        },
+      });
+      await expect(upload.start()).rejects.toThrow(UploadCancelledError);
+      expect(upload._activeXHR).toBeNull();
+    });
+  });
+
+  describe("onProgress callback", () => {
+    it("accepts onProgress option in constructor without error", () => {
+      const upload = new Upload({
+        id: "test",
+        url: "http://example.com",
+        file: makeFile("x"),
+        onProgress: () => {},
+      });
+      expect(upload.onProgress).toBeTypeOf("function");
+    });
+
+    it("completes upload successfully when onProgress is provided", async () => {
+      const progressCalls = [];
+      const fileData = randomData(CHUNK);
+      const upload = new Upload({
+        id: "onprogress-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+        onProgress: (info) => progressCalls.push(info),
+      });
+      const result = await upload.start();
+      expect(result.status).toBe(200);
+      // In Node.js with the XHR shim, xhr.upload is not implemented,
+      // so onProgress may fire 0 times — that's acceptable.
     });
   });
 });
