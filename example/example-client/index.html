@@ -1,9 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
 <head>
+  <meta charset="utf-8">
+  <title>GCS Browser Upload Example</title>
 </head>
 <body>
-  <h2>Test Upload</h2>
-  <input id="fileInput" type="file"></input>
-  <button id="pause">Pause</button>
-  <button id="unpause">Unpause</button>
-  <script src="lib/bundle.js"></script>
+  <h2>GCS Browser Upload</h2>
+
+  <p>
+    <input id="fileInput" type="file">
+  </p>
+  <p>
+    <button id="pause" disabled>Pause</button>
+    <button id="unpause" disabled>Unpause</button>
+    <button id="cancel" disabled>Cancel</button>
+  </p>
+  <pre id="log"></pre>
+
+  <script type="module" src="app.js"></script>
 </body>
+</html>
