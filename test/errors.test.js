@@ -7,6 +7,7 @@ import {
   UploadIncompleteError,
   InvalidChunkSizeError,
   UploadCancelledError,
+  UploadNetworkError,
 } from "../src/errors.js";
 
 describe("errors", () => {
@@ -18,6 +19,7 @@ describe("errors", () => {
     expect(new UploadIncompleteError()).toBeInstanceOf(Error);
     expect(new InvalidChunkSizeError(100)).toBeInstanceOf(Error);
     expect(new UploadCancelledError()).toBeInstanceOf(Error);
+    expect(new UploadNetworkError()).toBeInstanceOf(Error);
   });
 
   it("UploadFailedError stores status", () => {
@@ -42,7 +44,14 @@ describe("errors", () => {
       new UploadIncompleteError().name,
       new InvalidChunkSizeError(100).name,
       new UploadCancelledError().name,
+      new UploadNetworkError().name,
     ];
     expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("UploadNetworkError has the expected default message and name", () => {
+    const err = new UploadNetworkError();
+    expect(err.message).toBe("Upload failed due to network error");
+    expect(err.name).toBe("UploadNetworkError");
   });
 });

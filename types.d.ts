@@ -13,6 +13,7 @@ declare module "gcs-browser-upload" {
     chunkSize?: number;
     contentType?: string;
     onChunkUpload?: (data: ChunkUploadData) => void;
+    onProgress?: (info: { uploadedBytes: number; totalBytes: number }) => void;
   };
 
   type UploadResult = {
@@ -48,4 +49,5 @@ declare module "gcs-browser-upload" {
     constructor(chunkSize: number, message?: string);
   }
   export class UploadCancelledError extends Error {}
+  export class UploadNetworkError extends Error {}
 }

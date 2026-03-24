@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from "vitest";
 import Upload, {
   InvalidChunkSizeError,
   FileAlreadyUploadedError,
   UrlNotFoundError,
   UploadFailedError,
   UploadCancelledError,
+  UploadNetworkError,
 } from "../src/upload.js";
 import { start, resetServer, stop, getRequests, getBaseURL, setFailCountdown } from "./lib/server.js";
 import makeFile from "./lib/makeFile.js";
@@ -84,13 +85,13 @@ describe("Upload", () => {
       ).not.toThrow();
     });
 
-    it("defaults chunkSize to 2MB when not provided", () => {
+    it("defaults chunkSize to 512KB when not provided", () => {
       const upload = new Upload({
         id: "test",
         url: "http://example.com",
         file: makeFile("x"),
       });
-      expect(upload.chunkSize).toBe(2097152);
+      expect(upload.chunkSize).toBe(524288);
     });
 
     it("uses file.type for contentType when available", () => {
@@ -188,6 +189,31 @@ describe("Upload", () => {
       expect(FileAlreadyUploadedError).toBeDefined();
       expect(UrlNotFoundError).toBeDefined();
       expect(UploadFailedError).toBeDefined();
+      expect(UploadNetworkError).toBeDefined();
+    });
+  });
+
+  describe("network errors", () => {
+    it("throws UploadNetworkError when chunk upload exhausts network retries", async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("network down"));
+
+      const upload = new Upload({
+        id: "network-retry-exhaust",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(randomData(CHUNK * 2)),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => Promise.resolve();
+
+      try {
+        await expect(upload.start()).rejects.toBeInstanceOf(UploadNetworkError);
+        expect(fetchSpy).toHaveBeenCalledTimes(4);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
   });
 
@@ -434,6 +460,50 @@ describe("Upload", () => {
       const err = new UploadCancelledError();
       expect(err).toBeInstanceOf(Error);
       expect(err.name).toBe("UploadCancelledError");
+    });
+
+    it("sets _activeXHR to null after cancel", async () => {
+      const totalSize = CHUNK * 2;
+      const fileData = randomData(totalSize);
+      const upload = new Upload({
+        id: "cancel-xhr-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+        onChunkUpload: () => {
+          upload.cancel();
+        },
+      });
+      await expect(upload.start()).rejects.toThrow(UploadCancelledError);
+      expect(upload._activeXHR).toBeNull();
+    });
+  });
+
+  describe("onProgress callback", () => {
+    it("accepts onProgress option in constructor without error", () => {
+      const upload = new Upload({
+        id: "test",
+        url: "http://example.com",
+        file: makeFile("x"),
+        onProgress: () => {},
+      });
+      expect(upload.onProgress).toBeTypeOf("function");
+    });
+
+    it("completes upload successfully when onProgress is provided", async () => {
+      const progressCalls = [];
+      const fileData = randomData(CHUNK);
+      const upload = new Upload({
+        id: "onprogress-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+        onProgress: (info) => progressCalls.push(info),
+      });
+      const result = await upload.start();
+      expect(result.status).toBe(200);
+      // In Node.js with the XHR shim, xhr.upload is not implemented,
+      // so onProgress may fire 0 times — that's acceptable.
     });
   });
 });
