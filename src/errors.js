@@ -55,3 +55,10 @@ export class UploadCancelledError extends Error {
     this.name = "UploadCancelledError";
   }
 }
+
+export class UploadNetworkError extends Error {
+  constructor(message = "Upload failed due to network error") {
+    super(message);
+    this.name = "UploadNetworkError";
+  }
+}

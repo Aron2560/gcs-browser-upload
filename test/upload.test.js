@@ -5,6 +5,7 @@ import Upload, {
   UrlNotFoundError,
   UploadFailedError,
   UploadCancelledError,
+  UploadNetworkError,
 } from "../src/upload.js";
 import { start, resetServer, stop, getRequests, getBaseURL, setFailCountdown } from "./lib/server.js";
 import makeFile from "./lib/makeFile.js";
@@ -188,6 +189,31 @@ describe("Upload", () => {
       expect(FileAlreadyUploadedError).toBeDefined();
       expect(UrlNotFoundError).toBeDefined();
       expect(UploadFailedError).toBeDefined();
+      expect(UploadNetworkError).toBeDefined();
+    });
+  });
+
+  describe("network errors", () => {
+    it("throws UploadNetworkError when chunk upload exhausts network retries", async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("network down"));
+
+      const upload = new Upload({
+        id: "network-retry-exhaust",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(randomData(CHUNK * 2)),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => Promise.resolve();
+
+      try {
+        await expect(upload.start()).rejects.toBeInstanceOf(UploadNetworkError);
+        expect(fetchSpy).toHaveBeenCalledTimes(4);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
   });
 

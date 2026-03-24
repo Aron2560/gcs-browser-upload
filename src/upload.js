@@ -2,7 +2,7 @@
  * GCS Resumable Upload - browser-side chunked upload to Google Cloud Storage.
  *
  * Forked from QubitProducts/gcs-browser-upload and modernized:
- * - Replaced axios with native fetch
+ * - Replaced axios with native XMLHttpRequest for smooth upload progress events
  * - Replaced es6-promise with native Promise
  * - Replaced debug with no-op (remove if you don't need debug logging)
  * - Zero external runtime dependencies
@@ -14,7 +14,7 @@
  *     id: uniqueId,
  *     url: sessionUri,     // from server's resumable_write_url endpoint
  *     file: fileObject,
- *     chunkSize: 2097152,  // 2MB default
+ *     chunkSize: 524288,  // 512KB default — 2x the 256KB GCS minimum chunk unit
  *     onChunkUpload: ({uploadedBytes, totalBytes, chunkIndex, chunkLength}) => {},
  *   });
  *
@@ -34,6 +34,7 @@ import {
   UploadIncompleteError,
   InvalidChunkSizeError,
   UploadCancelledError,
+  UploadNetworkError,
 } from "./errors.js";
 
 // GCS requires chunk sizes to be multiples of 256KB (except the last chunk)
@@ -100,6 +101,7 @@ export {
   UploadIncompleteError,
   InvalidChunkSizeError,
   UploadCancelledError,
+  UploadNetworkError,
 };
 
 export default class Upload {
@@ -253,7 +255,7 @@ export default class Upload {
         };
         xhr.onerror = () => {
           this._activeXHR = null;
-          reject(new Error("XHR network error"));
+          reject(new UploadNetworkError());
         };
         xhr.send(null);
       });
@@ -333,7 +335,7 @@ export default class Upload {
             if (isLastChunk && xhr.status === 0) {
               resolve({ status: 200, data: null, _corsSuccess: true });
             } else {
-              reject(new Error("XHR network error"));
+              reject(new UploadNetworkError());
             }
           };
           xhr.send(buffer);
