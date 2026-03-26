@@ -89,22 +89,23 @@ export default class Upload {
 
   /**
    * Start or resume the upload.
+   * For single-chunk uploads (file <= chunkSize), skips resume probe,
+   * checksums, and Content-Range header for optimal performance.
    * @returns {Promise<Object>} Response from the final chunk upload
    */
   async start() {
-    // Single-chunk optimization: if file fits in one chunk, skip resume/chunking logic
-    if (this.file.size <= this.chunkSize) {
-      return this._uploadSingleChunk();
-    }
+    const isSingleChunk = this.file.size <= this.chunkSize;
 
-    const hadResumeMeta = this.meta.isResumable();
-    const resumeOffset = await this._getResumeOffset();
-
-    // If we have local resume metadata but GCS reports offset 0, we are almost
-    // certainly on a fresh/expired resumable session URI. Clear stale checksums
-    // so we do not skip initial chunks that this session has never received.
-    if (hadResumeMeta && resumeOffset === 0) {
-      this.meta.deleteMeta();
+    let resumeOffset = 0;
+    if (!isSingleChunk) {
+      const hadResumeMeta = this.meta.isResumable();
+      resumeOffset = await this._getResumeOffset();
+      // If we have local resume metadata but GCS reports offset 0, we are almost
+      // certainly on a fresh/expired resumable session URI. Clear stale checksums
+      // so we do not skip initial chunks that this session has never received.
+      if (hadResumeMeta && resumeOffset === 0) {
+        this.meta.deleteMeta();
+      }
     }
 
     const startIndex = Math.floor(resumeOffset / this.chunkSize);
@@ -144,16 +145,20 @@ export default class Upload {
       );
 
       // Check if we can skip this chunk (resume case)
-      const newChecksum = await this.processor.checksum(buffer);
-      const existingChecksum = this.meta.getChecksum(chunkIndex);
-
-      if (existingChecksum && existingChecksum === newChecksum && !isLastChunk) {
-        // Chunk already uploaded with matching checksum, skip it
-        continue;
+      let newChecksum = null;
+      if (!isSingleChunk) {
+        newChecksum = await this.processor.checksum(buffer);
+        const existingChecksum = this.meta.getChecksum(chunkIndex);
+        if (existingChecksum && existingChecksum === newChecksum && !isLastChunk) {
+          // Chunk already uploaded with matching checksum, skip it
+          continue;
+        }
       }
 
       // Upload the chunk
-      const contentRange = `bytes ${start}-${end - 1}/${this.file.size}`;
+      const contentRange = isSingleChunk
+        ? null
+        : `bytes ${start}-${end - 1}/${this.file.size}`;
       const response = await this._uploadChunk(
         buffer,
         contentRange,
@@ -162,7 +167,9 @@ export default class Upload {
       );
 
       // Store checksum for resume
-      this.meta.addChecksum(chunkIndex, newChecksum);
+      if (!isSingleChunk) {
+        this.meta.addChecksum(chunkIndex, newChecksum);
+      }
 
       // Progress callback
       this.onChunkUpload({
@@ -250,7 +257,7 @@ export default class Upload {
   /**
    * Upload a single chunk to GCS with retry on transient errors.
    * @param {ArrayBuffer} buffer - Chunk data
-   * @param {string} contentRange - Content-Range header value
+   * @param {string|null} contentRange - Content-Range header value
    * @param {boolean} isLastChunk - Whether this is the final chunk
    * @param {number} chunkStart - Starting byte offset for this chunk
    * @param {number} [maxRetries=3] - Maximum retry attempts for 5xx/network errors
@@ -258,6 +265,11 @@ export default class Upload {
    */
   async _uploadChunk(buffer, contentRange, isLastChunk, chunkStart, maxRetries = 3) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (this._cancelled) {
+        this.meta.deleteMeta();
+        throw new UploadCancelledError();
+      }
+
       let response;
 
       try {
@@ -266,7 +278,9 @@ export default class Upload {
         let bytesSent = 0;
         response = await new Promise((resolve, reject) => {
           xhr.open("PUT", this.url);
-          xhr.setRequestHeader("Content-Range", contentRange);
+          if (contentRange) {
+            xhr.setRequestHeader("Content-Range", contentRange);
+          }
           for (const [name, value] of Object.entries(this.headers)) {
             xhr.setRequestHeader(name, value);
           }
@@ -340,123 +354,6 @@ export default class Upload {
       }
 
       // Other errors (4xx) -- not retryable
-      throw new UploadFailedError(
-        response.status,
-        `Upload failed with status ${response.status}`,
-      );
-    }
-  }
-
-  /**
-   * Upload the entire file in a single PUT request (no Content-Range).
-   * Used when file.size <= chunkSize for optimal performance.
-   * @param {number} [maxRetries=3] - Maximum retry attempts for 5xx/network errors
-   * @returns {Promise<Object>} Parsed response
-   */
-  async _uploadSingleChunk(maxRetries = 3) {
-    if (this._cancelled) {
-      this.meta.deleteMeta();
-      throw new UploadCancelledError();
-    }
-
-    const buffer = await this.processor.readChunk(this.file, 0, this.file.size);
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      if (this._cancelled) {
-        this.meta.deleteMeta();
-        throw new UploadCancelledError();
-      }
-
-      let response;
-
-      try {
-        const xhr = new XMLHttpRequest();
-        this._activeXHR = xhr;
-        let bytesSent = 0;
-        response = await new Promise((resolve, reject) => {
-          xhr.open("PUT", this.url);
-          for (const [name, value] of Object.entries(this.headers)) {
-            xhr.setRequestHeader(name, value);
-          }
-          if (xhr.upload) {
-            xhr.upload.onprogress = (evt) => {
-              if (evt.lengthComputable) {
-                bytesSent = evt.loaded;
-                if (!this._cancelled) {
-                  this.onProgress({
-                    uploadedBytes: evt.loaded,
-                    totalBytes: this.file.size,
-                  });
-                }
-              }
-            };
-          }
-          xhr.onload = () => {
-            this._activeXHR = null;
-            resolve({ status: xhr.status, responseText: xhr.responseText });
-          };
-          xhr.onerror = () => {
-            this._activeXHR = null;
-            // All bytes sent + onerror = CORS-masked success
-            if (bytesSent >= buffer.byteLength) {
-              resolve({ status: 200, data: null, _corsSuccess: true });
-            } else {
-              reject(new UploadNetworkError());
-            }
-          };
-          xhr.send(buffer);
-        });
-
-        if (response._corsSuccess === true) {
-          this.meta.deleteMeta();
-          this.onChunkUpload({
-            uploadedBytes: this.file.size,
-            totalBytes: this.file.size,
-            chunkIndex: 0,
-            chunkLength: this.file.size,
-          });
-          return { status: 200, data: null };
-        }
-      } catch (error) {
-        if (attempt < maxRetries) {
-          await this._backoff(attempt);
-          continue;
-        }
-        throw error;
-      }
-
-      // Success
-      if (response.status === 200 || response.status === 201) {
-        const body = JSON.parse(response.responseText);
-        this.meta.deleteMeta();
-        this.onChunkUpload({
-          uploadedBytes: this.file.size,
-          totalBytes: this.file.size,
-          chunkIndex: 0,
-          chunkLength: this.file.size,
-        });
-        return { status: response.status, data: body };
-      }
-
-      // 404/410 — session expired
-      if (response.status === 404 || response.status === 410) {
-        this.meta.deleteMeta();
-        throw new UrlNotFoundError();
-      }
-
-      // 5xx — retry with backoff
-      if (response.status >= 500) {
-        if (attempt < maxRetries) {
-          await this._backoff(attempt);
-          continue;
-        }
-        throw new UploadFailedError(
-          response.status,
-          `Server error: ${response.status}`,
-        );
-      }
-
-      // Other 4xx — not retryable
       throw new UploadFailedError(
         response.status,
         `Upload failed with status ${response.status}`,
