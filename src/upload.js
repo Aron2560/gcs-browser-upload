@@ -310,13 +310,14 @@ export default class Upload {
    * @param {number} [maxRetries=3] - Maximum retry attempts for 5xx/network errors
    * @returns {Promise<Object>} Parsed response for last chunk, or status info for intermediate
    */
-  async _uploadChunk(buffer, contentRange, isLastChunk, chunkStart, maxRetries = 3) {
+   async _uploadChunk(buffer, contentRange, isLastChunk, chunkStart, maxRetries = 3) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       let response;
 
       try {
         const xhr = new XMLHttpRequest();
         this._activeXHR = xhr;
+        let bytesSent = 0;
         response = await new Promise((resolve, reject) => {
           xhr.open("PUT", this.url);
           xhr.setRequestHeader("Content-Disposition", "attachment");
@@ -324,11 +325,14 @@ export default class Upload {
           xhr.setRequestHeader("Content-Type", this.contentType);
           if (xhr.upload) {
             xhr.upload.onprogress = (evt) => {
-              if (evt.lengthComputable && !this._cancelled) {
-                this.onProgress({
-                  uploadedBytes: chunkStart + evt.loaded,
-                  totalBytes: this.file.size,
-                });
+              if (evt.lengthComputable) {
+                bytesSent = evt.loaded;
+                if (!this._cancelled) {
+                  this.onProgress({
+                    uploadedBytes: chunkStart + evt.loaded,
+                    totalBytes: this.file.size,
+                  });
+                }
               }
             };
           }
@@ -338,7 +342,8 @@ export default class Upload {
           };
           xhr.onerror = () => {
             this._activeXHR = null;
-            if (isLastChunk && xhr.status === 0) {
+            // All bytes sent + onerror on last chunk = CORS-masked success
+            if (isLastChunk && bytesSent >= buffer.byteLength) {
               resolve({ status: 200, data: null, _corsSuccess: true });
             } else {
               reject(new UploadNetworkError());
@@ -420,17 +425,21 @@ export default class Upload {
       try {
         const xhr = new XMLHttpRequest();
         this._activeXHR = xhr;
+        let bytesSent = 0;
         response = await new Promise((resolve, reject) => {
           xhr.open("PUT", this.url);
           xhr.setRequestHeader("Content-Disposition", "attachment");
           xhr.setRequestHeader("Content-Type", this.contentType);
           if (xhr.upload) {
             xhr.upload.onprogress = (evt) => {
-              if (evt.lengthComputable && !this._cancelled) {
-                this.onProgress({
-                  uploadedBytes: evt.loaded,
-                  totalBytes: this.file.size,
-                });
+              if (evt.lengthComputable) {
+                bytesSent = evt.loaded;
+                if (!this._cancelled) {
+                  this.onProgress({
+                    uploadedBytes: evt.loaded,
+                    totalBytes: this.file.size,
+                  });
+                }
               }
             };
           }
@@ -440,10 +449,26 @@ export default class Upload {
           };
           xhr.onerror = () => {
             this._activeXHR = null;
-            reject(new UploadNetworkError());
+            // All bytes sent + onerror = CORS-masked success
+            if (bytesSent >= buffer.byteLength) {
+              resolve({ status: 200, data: null, _corsSuccess: true });
+            } else {
+              reject(new UploadNetworkError());
+            }
           };
           xhr.send(buffer);
         });
+
+        if (response._corsSuccess === true) {
+          this.meta.deleteMeta();
+          this.onChunkUpload({
+            uploadedBytes: this.file.size,
+            totalBytes: this.file.size,
+            chunkIndex: 0,
+            chunkLength: this.file.size,
+          });
+          return { status: 200, data: null };
+        }
       } catch (error) {
         if (attempt < maxRetries) {
           await this._backoff(attempt);
