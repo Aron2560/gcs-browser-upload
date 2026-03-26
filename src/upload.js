@@ -40,59 +40,6 @@ import {
 // GCS requires chunk sizes to be multiples of 256KB (except the last chunk)
 const MIN_CHUNK_SIZE = 262144; // 256KB
 
-if (typeof globalThis.XMLHttpRequest === "undefined") {
-  globalThis.XMLHttpRequest = class {
-    constructor() {
-      this.status = 0;
-      this.responseText = "";
-      this.onload = null;
-      this.onerror = null;
-      this._headers = {};
-      this._responseHeaders = null;
-      this._method = "GET";
-      this._url = "";
-    }
-
-    open(method, url) {
-      this._method = method;
-      this._url = url;
-    }
-
-    setRequestHeader(name, value) {
-      this._headers[name] = value;
-    }
-
-    getResponseHeader(name) {
-      if (!this._responseHeaders) {
-        return null;
-      }
-      return this._responseHeaders.get(name);
-    }
-
-    send(body) {
-      globalThis["fetch"](this._url, {
-        method: this._method,
-        headers: this._headers,
-        body,
-      })
-        .then(async (response) => {
-          this.status = response.status;
-          this._responseHeaders = response.headers;
-          this.responseText = await response.text();
-          if (this.onload) {
-            this.onload();
-          }
-        })
-        .catch(() => {
-          this.status = 0;
-          if (this.onerror) {
-            this.onerror();
-          }
-        });
-    }
-  };
-}
-
 export {
   DontBotherError,
   FileAlreadyUploadedError,
@@ -310,7 +257,7 @@ export default class Upload {
    * @param {number} [maxRetries=3] - Maximum retry attempts for 5xx/network errors
    * @returns {Promise<Object>} Parsed response for last chunk, or status info for intermediate
    */
-   async _uploadChunk(buffer, contentRange, isLastChunk, chunkStart, maxRetries = 3) {
+  async _uploadChunk(buffer, contentRange, isLastChunk, chunkStart, maxRetries = 3) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       let response;
 
