@@ -544,6 +544,31 @@ describe("Upload", () => {
       expect(reqs[0].headers["content-disposition"]).toBeUndefined();
     });
 
+    it("pauses and resumes correctly", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-pause",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload.pause();
+
+      const startPromise = upload.start();
+
+      await vi.waitFor(() => {
+        expect(upload._paused).toBe(true);
+      });
+
+      upload.unpause();
+
+      const result = await startPromise;
+
+      expect(result).toEqual({ status: 200, data: { status: "ok" } });
+      expect(getRequests()).toHaveLength(1);
+    });
+
     it("uploads file exactly equal to chunkSize via single-chunk path", async () => {
       const fileData = randomData(CHUNK);
       const upload = new Upload({
@@ -607,6 +632,80 @@ describe("Upload", () => {
 
       upload.cancel();
       await expect(upload.start()).rejects.toThrow(UploadCancelledError);
+    });
+
+    it("retries on 5xx and succeeds when server recovers", async () => {
+      setFailCountdown(2);
+      const fileData = randomData(100);
+
+      const upload = new Upload({
+        id: "single-chunk-retry",
+        url: `${getBaseURL()}/file/fail-then-succeed`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => Promise.resolve();
+
+      await upload.start();
+
+      expect(getRequests()).toHaveLength(3);
+    });
+
+    it("throws UploadFailedError when 5xx retries exhausted", async () => {
+      setFailCountdown(100);
+      const fileData = randomData(100);
+
+      const upload = new Upload({
+        id: "single-chunk-retry-exhaust",
+        url: `${getBaseURL()}/file/fail-then-succeed`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => Promise.resolve();
+
+      await expect(upload.start()).rejects.toThrow(UploadFailedError);
+      expect(getRequests()).toHaveLength(4);
+    });
+
+    it("throws UrlNotFoundError on 410 Gone", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-expired",
+        url: `${getBaseURL()}/file/expired`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => Promise.resolve();
+
+      await expect(upload.start()).rejects.toThrow(UrlNotFoundError);
+    });
+
+    it("throws UploadCancelledError when cancelled during retry backoff", async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("Network error"));
+
+      const upload = new Upload({
+        id: "single-chunk-cancel-retry",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(randomData(100)),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => {
+        upload.cancel();
+        return Promise.resolve();
+      };
+
+      try {
+        await expect(upload.start()).rejects.toThrow(UploadCancelledError);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
   });
 });
