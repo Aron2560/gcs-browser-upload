@@ -440,25 +440,10 @@ export default class Upload {
           };
           xhr.onerror = () => {
             this._activeXHR = null;
-            if (xhr.status === 0) {
-              resolve({ status: 200, data: null, _corsSuccess: true });
-            } else {
-              reject(new UploadNetworkError());
-            }
+            reject(new UploadNetworkError());
           };
           xhr.send(buffer);
         });
-
-        if (response._corsSuccess === true) {
-          this.meta.deleteMeta();
-          this.onChunkUpload({
-            uploadedBytes: this.file.size,
-            totalBytes: this.file.size,
-            chunkIndex: 0,
-            chunkLength: this.file.size,
-          });
-          return { status: 200, data: null };
-        }
       } catch (error) {
         if (attempt < maxRetries) {
           await this._backoff(attempt);
