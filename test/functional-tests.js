@@ -55,10 +55,13 @@ describe("Functional", () => {
       expect(requests[0].url).toBe("/file");
     });
 
-    it("should send the correct content-range header", () => {
-      expect(requests[0].headers["content-range"]).toBe(
-        `bytes 0-${CHUNK - 1}/${CHUNK}`,
-      );
+    it("should not send a content-range header", () => {
+      expect(requests[0].headers["content-range"]).toBeUndefined();
+    });
+
+    it("should send content-disposition and content-type headers", () => {
+      expect(requests[0].headers["content-disposition"]).toBe("attachment");
+      expect(requests[0].headers["content-type"]).toBeDefined();
     });
   });
 

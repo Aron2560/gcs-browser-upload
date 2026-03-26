@@ -12,7 +12,8 @@ router.use(express.text({ type: "*/*", limit: "10mb" }));
 router.use((req, res, next) => {
   const range = req.headers["content-range"];
   if (!range) {
-    res.status(400).send("No content-range header");
+    req.range = null;
+    next();
     return;
   }
 
@@ -46,6 +47,11 @@ router.use((req, res, next) => {
 });
 
 router.put("/", (req, res) => {
+  if (req.range === null) {
+    res.status(200).json({ status: "ok" });
+    return;
+  }
+
   if (!file) {
     file = { total: req.range.total, index: 0 };
   }

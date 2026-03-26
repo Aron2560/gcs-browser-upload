@@ -120,8 +120,8 @@ export default class Upload {
     this.url = opts.url;
     this.file = opts.file;
     this.chunkSize = opts.chunkSize ?? 524288;
-    this.onChunkUpload = opts.onChunkUpload || (() => {});
-    this.onProgress = opts.onProgress || (() => {});
+    this.onChunkUpload = opts.onChunkUpload || (() => { });
+    this.onProgress = opts.onProgress || (() => { });
     this.contentType =
       opts.contentType || opts.file.type || "application/octet-stream";
 
@@ -146,6 +146,11 @@ export default class Upload {
    * @returns {Promise<Object>} Response from the final chunk upload
    */
   async start() {
+    // Single-chunk optimization: if file fits in one chunk, skip resume/chunking logic
+    if (this.file.size <= this.chunkSize) {
+      return this._uploadSingleChunk();
+    }
+
     const hadResumeMeta = this.meta.isResumable();
     const resumeOffset = await this._getResumeOffset();
 
@@ -314,6 +319,7 @@ export default class Upload {
         this._activeXHR = xhr;
         response = await new Promise((resolve, reject) => {
           xhr.open("PUT", this.url);
+          xhr.setRequestHeader("Content-Disposition", "attachment");
           xhr.setRequestHeader("Content-Range", contentRange);
           xhr.setRequestHeader("Content-Type", this.contentType);
           if (xhr.upload) {
@@ -382,6 +388,117 @@ export default class Upload {
       }
 
       // Other errors (4xx) -- not retryable
+      throw new UploadFailedError(
+        response.status,
+        `Upload failed with status ${response.status}`,
+      );
+    }
+  }
+
+  /**
+   * Upload the entire file in a single PUT request (no Content-Range).
+   * Used when file.size <= chunkSize for optimal performance.
+   * @param {number} [maxRetries=3] - Maximum retry attempts for 5xx/network errors
+   * @returns {Promise<Object>} Parsed response
+   */
+  async _uploadSingleChunk(maxRetries = 3) {
+    if (this._cancelled) {
+      this.meta.deleteMeta();
+      throw new UploadCancelledError();
+    }
+
+    const buffer = await this.processor.readChunk(this.file, 0, this.file.size);
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (this._cancelled) {
+        this.meta.deleteMeta();
+        throw new UploadCancelledError();
+      }
+
+      let response;
+
+      try {
+        const xhr = new XMLHttpRequest();
+        this._activeXHR = xhr;
+        response = await new Promise((resolve, reject) => {
+          xhr.open("PUT", this.url);
+          xhr.setRequestHeader("Content-Disposition", "attachment");
+          xhr.setRequestHeader("Content-Type", this.contentType);
+          if (xhr.upload) {
+            xhr.upload.onprogress = (evt) => {
+              if (evt.lengthComputable && !this._cancelled) {
+                this.onProgress({
+                  uploadedBytes: evt.loaded,
+                  totalBytes: this.file.size,
+                });
+              }
+            };
+          }
+          xhr.onload = () => {
+            this._activeXHR = null;
+            resolve({ status: xhr.status, responseText: xhr.responseText });
+          };
+          xhr.onerror = () => {
+            this._activeXHR = null;
+            if (xhr.status === 0) {
+              resolve({ status: 200, data: null, _corsSuccess: true });
+            } else {
+              reject(new UploadNetworkError());
+            }
+          };
+          xhr.send(buffer);
+        });
+
+        if (response._corsSuccess === true) {
+          this.meta.deleteMeta();
+          this.onChunkUpload({
+            uploadedBytes: this.file.size,
+            totalBytes: this.file.size,
+            chunkIndex: 0,
+            chunkLength: this.file.size,
+          });
+          return { status: 200, data: null };
+        }
+      } catch (error) {
+        if (attempt < maxRetries) {
+          await this._backoff(attempt);
+          continue;
+        }
+        throw error;
+      }
+
+      // Success
+      if (response.status === 200 || response.status === 201) {
+        const body = JSON.parse(response.responseText);
+        this.meta.deleteMeta();
+        this.onChunkUpload({
+          uploadedBytes: this.file.size,
+          totalBytes: this.file.size,
+          chunkIndex: 0,
+          chunkLength: this.file.size,
+        });
+        return { status: response.status, data: body };
+      }
+
+      // 404/410 — session expired
+      if (response.status === 404 || response.status === 410) {
+        this.meta.deleteMeta();
+        throw new UrlNotFoundError();
+      }
+
+      // 5xx — retry with backoff
+      if (response.status >= 500) {
+        if (attempt < maxRetries) {
+          await this._backoff(attempt);
+          continue;
+        }
+        throw new UploadFailedError(
+          response.status,
+          `Server error: ${response.status}`,
+        );
+      }
+
+      // Other 4xx — not retryable
       throw new UploadFailedError(
         response.status,
         `Upload failed with status ${response.status}`,

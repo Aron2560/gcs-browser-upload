@@ -220,7 +220,7 @@ describe("Upload", () => {
   describe("retry on 5xx", () => {
     it("retries and succeeds when server recovers", async () => {
       setFailCountdown(2);
-      const fileData = randomData(CHUNK);
+      const fileData = randomData(CHUNK + 100);
 
       const upload = new Upload({
         id: "retry-test",
@@ -234,13 +234,12 @@ describe("Upload", () => {
 
       await upload.start();
       const reqs = getRequests();
-      // 2 failed + 1 success = 3 requests
-      expect(reqs).toHaveLength(3);
+      expect(reqs).toHaveLength(4);
     });
 
     it("throws UploadFailedError when retries exhausted", async () => {
       setFailCountdown(100);
-      const fileData = randomData(CHUNK);
+      const fileData = randomData(CHUNK + 100);
 
       const upload = new Upload({
         id: "retry-exhaust",
@@ -504,6 +503,94 @@ describe("Upload", () => {
       expect(result.status).toBe(200);
       // In Node.js with the XHR shim, xhr.upload is not implemented,
       // so onProgress may fire 0 times — that's acceptable.
+    });
+  });
+
+  describe("single-chunk upload (file <= chunkSize)", () => {
+    it("uploads file in one request without Content-Range header", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      const result = await upload.start();
+
+      expect(result).toEqual({ status: 200, data: { status: "ok" } });
+
+      const reqs = getRequests();
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].method).toBe("PUT");
+      expect(reqs[0].headers["content-range"]).toBeUndefined();
+      expect(reqs[0].headers["content-disposition"]).toBe("attachment");
+      expect(reqs[0].headers["content-type"]).toBeDefined();
+    });
+
+    it("uploads file exactly equal to chunkSize via single-chunk path", async () => {
+      const fileData = randomData(CHUNK);
+      const upload = new Upload({
+        id: "single-chunk-exact",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      const result = await upload.start();
+      expect(result).toEqual({ status: 200, data: { status: "ok" } });
+
+      const reqs = getRequests();
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].headers["content-range"]).toBeUndefined();
+    });
+
+    it("fires onChunkUpload callback once", async () => {
+      const chunks = [];
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-cb",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+        onChunkUpload: (info) => chunks.push(info),
+      });
+
+      await upload.start();
+
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]).toEqual({
+        uploadedBytes: 100,
+        totalBytes: 100,
+        chunkIndex: 0,
+        chunkLength: 100,
+      });
+    });
+
+    it("clears localStorage meta on completion", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-meta",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      await upload.start();
+      expect(upload.meta.isResumable()).toBe(false);
+    });
+
+    it("supports cancel before start", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-cancel",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload.cancel();
+      await expect(upload.start()).rejects.toThrow(UploadCancelledError);
     });
   });
 });
