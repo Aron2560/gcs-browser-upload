@@ -82,6 +82,11 @@ router.put("/fail-then-succeed", (req, res) => {
     return;
   }
 
+  if (req.range === null) {
+    res.status(200).json({ status: "ok" });
+    return;
+  }
+
   if (!file) {
     file = { total: req.range.total, index: 0 };
   }
