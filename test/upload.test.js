@@ -93,27 +93,44 @@ describe("Upload", () => {
       });
       expect(upload.chunkSize).toBe(524288);
     });
+  });
 
-    it("uses file.type for contentType when available", () => {
-      const file = makeFile("x");
-      file.type = "application/pdf";
+  describe("custom headers passthrough", () => {
+    it("sends custom headers on chunk PUT requests", async () => {
+      const fileData = randomData(100);
       const upload = new Upload({
-        id: "test",
-        url: "http://example.com",
-        file,
+        id: "custom-headers-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+        headers: {
+          "Content-Disposition": "attachment",
+          "X-Custom-Header": "test-value",
+        },
       });
-      expect(upload.contentType).toBe("application/pdf");
+
+      await upload.start();
+
+      const reqs = getRequests();
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].headers["content-disposition"]).toBe("attachment");
+      expect(reqs[0].headers["x-custom-header"]).toBe("test-value");
     });
 
-    it("falls back to application/octet-stream when no contentType", () => {
-      const file = makeFile("x");
-      file.type = "";
+    it("sends no extra headers when opts.headers is omitted", async () => {
+      const fileData = randomData(100);
       const upload = new Upload({
-        id: "test",
-        url: "http://example.com",
-        file,
+        id: "no-headers-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
       });
-      expect(upload.contentType).toBe("application/octet-stream");
+
+      await upload.start();
+
+      const reqs = getRequests();
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].headers["content-disposition"]).toBeUndefined();
     });
   });
 
@@ -524,8 +541,7 @@ describe("Upload", () => {
       expect(reqs).toHaveLength(1);
       expect(reqs[0].method).toBe("PUT");
       expect(reqs[0].headers["content-range"]).toBeUndefined();
-      expect(reqs[0].headers["content-disposition"]).toBe("attachment");
-      expect(reqs[0].headers["content-type"]).toBeDefined();
+      expect(reqs[0].headers["content-disposition"]).toBeUndefined();
     });
 
     it("uploads file exactly equal to chunkSize via single-chunk path", async () => {

@@ -60,7 +60,7 @@ export default class Upload {
    * @param {number} [opts.chunkSize=524288] - Chunk size in bytes (must be multiple of 256KB)
    * @param {Function} [opts.onChunkUpload] - Progress callback
    * @param {Function} [opts.onProgress] - Intra-chunk progress callback: ({ uploadedBytes, totalBytes }) => {}
-   * @param {string} [opts.contentType] - MIME type (defaults to file.type or application/octet-stream)
+   * @param {Object} [opts.headers] - Extra headers to send on each chunk PUT request
    */
   constructor(opts) {
     this.id = opts.id;
@@ -69,8 +69,7 @@ export default class Upload {
     this.chunkSize = opts.chunkSize ?? 524288;
     this.onChunkUpload = opts.onChunkUpload || (() => { });
     this.onProgress = opts.onProgress || (() => { });
-    this.contentType =
-      opts.contentType || opts.file.type || "application/octet-stream";
+    this.headers = opts.headers || {};
 
     // Validate chunk size
     if (this.chunkSize <= 0 || this.chunkSize % MIN_CHUNK_SIZE !== 0) {
@@ -267,9 +266,10 @@ export default class Upload {
         let bytesSent = 0;
         response = await new Promise((resolve, reject) => {
           xhr.open("PUT", this.url);
-          xhr.setRequestHeader("Content-Disposition", "attachment");
           xhr.setRequestHeader("Content-Range", contentRange);
-          xhr.setRequestHeader("Content-Type", this.contentType);
+          for (const [name, value] of Object.entries(this.headers)) {
+            xhr.setRequestHeader(name, value);
+          }
           if (xhr.upload) {
             xhr.upload.onprogress = (evt) => {
               if (evt.lengthComputable) {
@@ -375,8 +375,9 @@ export default class Upload {
         let bytesSent = 0;
         response = await new Promise((resolve, reject) => {
           xhr.open("PUT", this.url);
-          xhr.setRequestHeader("Content-Disposition", "attachment");
-          xhr.setRequestHeader("Content-Type", this.contentType);
+          for (const [name, value] of Object.entries(this.headers)) {
+            xhr.setRequestHeader(name, value);
+          }
           if (xhr.upload) {
             xhr.upload.onprogress = (evt) => {
               if (evt.lengthComputable) {
