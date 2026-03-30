@@ -93,27 +93,44 @@ describe("Upload", () => {
       });
       expect(upload.chunkSize).toBe(524288);
     });
+  });
 
-    it("uses file.type for contentType when available", () => {
-      const file = makeFile("x");
-      file.type = "application/pdf";
+  describe("custom headers passthrough", () => {
+    it("sends custom headers on chunk PUT requests", async () => {
+      const fileData = randomData(100);
       const upload = new Upload({
-        id: "test",
-        url: "http://example.com",
-        file,
+        id: "custom-headers-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+        headers: {
+          "Content-Disposition": "attachment",
+          "X-Custom-Header": "test-value",
+        },
       });
-      expect(upload.contentType).toBe("application/pdf");
+
+      await upload.start();
+
+      const reqs = getRequests();
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].headers["content-disposition"]).toBe("attachment");
+      expect(reqs[0].headers["x-custom-header"]).toBe("test-value");
     });
 
-    it("falls back to application/octet-stream when no contentType", () => {
-      const file = makeFile("x");
-      file.type = "";
+    it("sends no extra headers when opts.headers is omitted", async () => {
+      const fileData = randomData(100);
       const upload = new Upload({
-        id: "test",
-        url: "http://example.com",
-        file,
+        id: "no-headers-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
       });
-      expect(upload.contentType).toBe("application/octet-stream");
+
+      await upload.start();
+
+      const reqs = getRequests();
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].headers["content-disposition"]).toBeUndefined();
     });
   });
 
@@ -220,7 +237,7 @@ describe("Upload", () => {
   describe("retry on 5xx", () => {
     it("retries and succeeds when server recovers", async () => {
       setFailCountdown(2);
-      const fileData = randomData(CHUNK);
+      const fileData = randomData(CHUNK + 100);
 
       const upload = new Upload({
         id: "retry-test",
@@ -234,13 +251,12 @@ describe("Upload", () => {
 
       await upload.start();
       const reqs = getRequests();
-      // 2 failed + 1 success = 3 requests
-      expect(reqs).toHaveLength(3);
+      expect(reqs).toHaveLength(4);
     });
 
     it("throws UploadFailedError when retries exhausted", async () => {
       setFailCountdown(100);
-      const fileData = randomData(CHUNK);
+      const fileData = randomData(CHUNK + 100);
 
       const upload = new Upload({
         id: "retry-exhaust",
@@ -504,6 +520,192 @@ describe("Upload", () => {
       expect(result.status).toBe(200);
       // In Node.js with the XHR shim, xhr.upload is not implemented,
       // so onProgress may fire 0 times — that's acceptable.
+    });
+  });
+
+  describe("single-chunk upload (file <= chunkSize)", () => {
+    it("uploads file in one request without Content-Range header", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-test",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      const result = await upload.start();
+
+      expect(result).toEqual({ status: 200, data: { status: "ok" } });
+
+      const reqs = getRequests();
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].method).toBe("PUT");
+      expect(reqs[0].headers["content-range"]).toBeUndefined();
+      expect(reqs[0].headers["content-disposition"]).toBeUndefined();
+    });
+
+    it("pauses and resumes correctly", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-pause",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload.pause();
+
+      const startPromise = upload.start();
+
+      await vi.waitFor(() => {
+        expect(upload._paused).toBe(true);
+      });
+
+      upload.unpause();
+
+      const result = await startPromise;
+
+      expect(result).toEqual({ status: 200, data: { status: "ok" } });
+      expect(getRequests()).toHaveLength(1);
+    });
+
+    it("uploads file exactly equal to chunkSize via single-chunk path", async () => {
+      const fileData = randomData(CHUNK);
+      const upload = new Upload({
+        id: "single-chunk-exact",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      const result = await upload.start();
+      expect(result).toEqual({ status: 200, data: { status: "ok" } });
+
+      const reqs = getRequests();
+      expect(reqs).toHaveLength(1);
+      expect(reqs[0].headers["content-range"]).toBeUndefined();
+    });
+
+    it("fires onChunkUpload callback once", async () => {
+      const chunks = [];
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-cb",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+        onChunkUpload: (info) => chunks.push(info),
+      });
+
+      await upload.start();
+
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]).toEqual({
+        uploadedBytes: 100,
+        totalBytes: 100,
+        chunkIndex: 0,
+        chunkLength: 100,
+      });
+    });
+
+    it("clears localStorage meta on completion", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-meta",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      await upload.start();
+      expect(upload.meta.isResumable()).toBe(false);
+    });
+
+    it("supports cancel before start", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-cancel",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload.cancel();
+      await expect(upload.start()).rejects.toThrow(UploadCancelledError);
+    });
+
+    it("retries on 5xx and succeeds when server recovers", async () => {
+      setFailCountdown(2);
+      const fileData = randomData(100);
+
+      const upload = new Upload({
+        id: "single-chunk-retry",
+        url: `${getBaseURL()}/file/fail-then-succeed`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => Promise.resolve();
+
+      await upload.start();
+
+      expect(getRequests()).toHaveLength(3);
+    });
+
+    it("throws UploadFailedError when 5xx retries exhausted", async () => {
+      setFailCountdown(100);
+      const fileData = randomData(100);
+
+      const upload = new Upload({
+        id: "single-chunk-retry-exhaust",
+        url: `${getBaseURL()}/file/fail-then-succeed`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => Promise.resolve();
+
+      await expect(upload.start()).rejects.toThrow(UploadFailedError);
+      expect(getRequests()).toHaveLength(4);
+    });
+
+    it("throws UrlNotFoundError on 410 Gone", async () => {
+      const fileData = randomData(100);
+      const upload = new Upload({
+        id: "single-chunk-expired",
+        url: `${getBaseURL()}/file/expired`,
+        file: makeFile(fileData),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => Promise.resolve();
+
+      await expect(upload.start()).rejects.toThrow(UrlNotFoundError);
+    });
+
+    it("throws UploadCancelledError when cancelled during retry backoff", async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("Network error"));
+
+      const upload = new Upload({
+        id: "single-chunk-cancel-retry",
+        url: `${getBaseURL()}/file`,
+        file: makeFile(randomData(100)),
+        chunkSize: CHUNK,
+      });
+
+      upload._backoff = () => {
+        upload.cancel();
+        return Promise.resolve();
+      };
+
+      try {
+        await expect(upload.start()).rejects.toThrow(UploadCancelledError);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
   });
 });

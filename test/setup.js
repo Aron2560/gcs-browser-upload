@@ -83,6 +83,81 @@ if (typeof globalThis.localStorage === "undefined") {
 // FileReader needs to be global (source code does `new FileReader()`)
 globalThis.FileReader = FileReaderShim;
 
+// --- XMLHttpRequest shim (fetch-backed) ---
+// Implements the subset of XHR that src/upload.js uses:
+//   open, setRequestHeader, send, abort, onload, onerror,
+//   upload.onprogress, status, responseText, getResponseHeader
+class XMLHttpRequestShim {
+  constructor() {
+    this.method = null;
+    this._url = null;
+    this._headers = {};
+    this._aborted = false;
+    this.status = 0;
+    this.responseText = "";
+    this.onload = null;
+    this.onerror = null;
+    this._responseHeaders = {};
+    this.upload = { onprogress: null };
+    this._abortController = null;
+  }
+
+  open(method, url) {
+    this.method = method;
+    this._url = url;
+  }
+
+  setRequestHeader(name, value) {
+    this._headers[name] = value;
+  }
+
+  getResponseHeader(name) {
+    return this._responseHeaders[name.toLowerCase()] ?? null;
+  }
+
+  abort() {
+    this._aborted = true;
+    if (this._abortController) {
+      this._abortController.abort();
+    }
+  }
+
+  send(body) {
+    if (this._aborted) return;
+
+    this._abortController = new AbortController();
+
+    const fetchOpts = {
+      method: this.method,
+      headers: this._headers,
+      signal: this._abortController.signal,
+    };
+    if (body !== null && body !== undefined) {
+      fetchOpts.body = body;
+    }
+
+    globalThis
+      .fetch(this._url, fetchOpts)
+      .then(async (res) => {
+        if (this._aborted) return;
+        this.status = res.status;
+        this.responseText = await res.text();
+        res.headers.forEach((v, k) => {
+          this._responseHeaders[k] = v;
+        });
+        if (this.onload) this.onload();
+      })
+      .catch((_err) => {
+        if (this._aborted) return;
+        if (this.onerror) this.onerror();
+      });
+  }
+}
+
+if (typeof globalThis.XMLHttpRequest === "undefined") {
+  globalThis.XMLHttpRequest = XMLHttpRequestShim;
+}
+
 // crypto.subtle is available in Node 20+ via globalThis.crypto
 // If for some reason it's missing, we'd need webcrypto — but Node 20+ should have it.
 if (!globalThis.crypto?.subtle) {

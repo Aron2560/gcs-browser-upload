@@ -40,59 +40,6 @@ import {
 // GCS requires chunk sizes to be multiples of 256KB (except the last chunk)
 const MIN_CHUNK_SIZE = 262144; // 256KB
 
-if (typeof globalThis.XMLHttpRequest === "undefined") {
-  globalThis.XMLHttpRequest = class {
-    constructor() {
-      this.status = 0;
-      this.responseText = "";
-      this.onload = null;
-      this.onerror = null;
-      this._headers = {};
-      this._responseHeaders = null;
-      this._method = "GET";
-      this._url = "";
-    }
-
-    open(method, url) {
-      this._method = method;
-      this._url = url;
-    }
-
-    setRequestHeader(name, value) {
-      this._headers[name] = value;
-    }
-
-    getResponseHeader(name) {
-      if (!this._responseHeaders) {
-        return null;
-      }
-      return this._responseHeaders.get(name);
-    }
-
-    send(body) {
-      globalThis["fetch"](this._url, {
-        method: this._method,
-        headers: this._headers,
-        body,
-      })
-        .then(async (response) => {
-          this.status = response.status;
-          this._responseHeaders = response.headers;
-          this.responseText = await response.text();
-          if (this.onload) {
-            this.onload();
-          }
-        })
-        .catch(() => {
-          this.status = 0;
-          if (this.onerror) {
-            this.onerror();
-          }
-        });
-    }
-  };
-}
-
 export {
   DontBotherError,
   FileAlreadyUploadedError,
@@ -113,17 +60,16 @@ export default class Upload {
    * @param {number} [opts.chunkSize=524288] - Chunk size in bytes (must be multiple of 256KB)
    * @param {Function} [opts.onChunkUpload] - Progress callback
    * @param {Function} [opts.onProgress] - Intra-chunk progress callback: ({ uploadedBytes, totalBytes }) => {}
-   * @param {string} [opts.contentType] - MIME type (defaults to file.type or application/octet-stream)
+   * @param {Object} [opts.headers] - Extra headers to send on each chunk PUT request
    */
   constructor(opts) {
     this.id = opts.id;
     this.url = opts.url;
     this.file = opts.file;
     this.chunkSize = opts.chunkSize ?? 524288;
-    this.onChunkUpload = opts.onChunkUpload || (() => {});
-    this.onProgress = opts.onProgress || (() => {});
-    this.contentType =
-      opts.contentType || opts.file.type || "application/octet-stream";
+    this.onChunkUpload = opts.onChunkUpload || (() => { });
+    this.onProgress = opts.onProgress || (() => { });
+    this.headers = opts.headers || {};
 
     // Validate chunk size
     if (this.chunkSize <= 0 || this.chunkSize % MIN_CHUNK_SIZE !== 0) {
@@ -143,17 +89,23 @@ export default class Upload {
 
   /**
    * Start or resume the upload.
+   * For single-chunk uploads (file <= chunkSize), skips resume probe,
+   * checksums, and Content-Range header for optimal performance.
    * @returns {Promise<Object>} Response from the final chunk upload
    */
   async start() {
-    const hadResumeMeta = this.meta.isResumable();
-    const resumeOffset = await this._getResumeOffset();
+    const isSingleChunk = this.file.size <= this.chunkSize;
 
-    // If we have local resume metadata but GCS reports offset 0, we are almost
-    // certainly on a fresh/expired resumable session URI. Clear stale checksums
-    // so we do not skip initial chunks that this session has never received.
-    if (hadResumeMeta && resumeOffset === 0) {
-      this.meta.deleteMeta();
+    let resumeOffset = 0;
+    if (!isSingleChunk) {
+      const hadResumeMeta = this.meta.isResumable();
+      resumeOffset = await this._getResumeOffset();
+      // If we have local resume metadata but GCS reports offset 0, we are almost
+      // certainly on a fresh/expired resumable session URI. Clear stale checksums
+      // so we do not skip initial chunks that this session has never received.
+      if (hadResumeMeta && resumeOffset === 0) {
+        this.meta.deleteMeta();
+      }
     }
 
     const startIndex = Math.floor(resumeOffset / this.chunkSize);
@@ -193,16 +145,20 @@ export default class Upload {
       );
 
       // Check if we can skip this chunk (resume case)
-      const newChecksum = await this.processor.checksum(buffer);
-      const existingChecksum = this.meta.getChecksum(chunkIndex);
-
-      if (existingChecksum && existingChecksum === newChecksum && !isLastChunk) {
-        // Chunk already uploaded with matching checksum, skip it
-        continue;
+      let newChecksum = null;
+      if (!isSingleChunk) {
+        newChecksum = await this.processor.checksum(buffer);
+        const existingChecksum = this.meta.getChecksum(chunkIndex);
+        if (existingChecksum && existingChecksum === newChecksum && !isLastChunk) {
+          // Chunk already uploaded with matching checksum, skip it
+          continue;
+        }
       }
 
       // Upload the chunk
-      const contentRange = `bytes ${start}-${end - 1}/${this.file.size}`;
+      const contentRange = isSingleChunk
+        ? null
+        : `bytes ${start}-${end - 1}/${this.file.size}`;
       const response = await this._uploadChunk(
         buffer,
         contentRange,
@@ -211,7 +167,9 @@ export default class Upload {
       );
 
       // Store checksum for resume
-      this.meta.addChecksum(chunkIndex, newChecksum);
+      if (!isSingleChunk) {
+        this.meta.addChecksum(chunkIndex, newChecksum);
+      }
 
       // Progress callback
       this.onChunkUpload({
@@ -299,7 +257,7 @@ export default class Upload {
   /**
    * Upload a single chunk to GCS with retry on transient errors.
    * @param {ArrayBuffer} buffer - Chunk data
-   * @param {string} contentRange - Content-Range header value
+   * @param {string|null} contentRange - Content-Range header value
    * @param {boolean} isLastChunk - Whether this is the final chunk
    * @param {number} chunkStart - Starting byte offset for this chunk
    * @param {number} [maxRetries=3] - Maximum retry attempts for 5xx/network errors
@@ -307,22 +265,35 @@ export default class Upload {
    */
   async _uploadChunk(buffer, contentRange, isLastChunk, chunkStart, maxRetries = 3) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (this._cancelled) {
+        this.meta.deleteMeta();
+        throw new UploadCancelledError();
+      }
+
       let response;
 
       try {
         const xhr = new XMLHttpRequest();
         this._activeXHR = xhr;
+        let bytesSent = 0;
         response = await new Promise((resolve, reject) => {
           xhr.open("PUT", this.url);
-          xhr.setRequestHeader("Content-Range", contentRange);
-          xhr.setRequestHeader("Content-Type", this.contentType);
+          if (contentRange) {
+            xhr.setRequestHeader("Content-Range", contentRange);
+          }
+          for (const [name, value] of Object.entries(this.headers)) {
+            xhr.setRequestHeader(name, value);
+          }
           if (xhr.upload) {
             xhr.upload.onprogress = (evt) => {
-              if (evt.lengthComputable && !this._cancelled) {
-                this.onProgress({
-                  uploadedBytes: chunkStart + evt.loaded,
-                  totalBytes: this.file.size,
-                });
+              if (evt.lengthComputable) {
+                bytesSent = evt.loaded;
+                if (!this._cancelled) {
+                  this.onProgress({
+                    uploadedBytes: chunkStart + evt.loaded,
+                    totalBytes: this.file.size,
+                  });
+                }
               }
             };
           }
@@ -332,7 +303,8 @@ export default class Upload {
           };
           xhr.onerror = () => {
             this._activeXHR = null;
-            if (isLastChunk && xhr.status === 0) {
+            // All bytes sent + onerror on last chunk = CORS-masked success
+            if (isLastChunk && bytesSent >= buffer.byteLength) {
               resolve({ status: 200, data: null, _corsSuccess: true });
             } else {
               reject(new UploadNetworkError());
